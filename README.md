@@ -94,11 +94,32 @@ Things worth knowing before changing the rendering:
 - **Low bands interpolate between bins.** Below roughly 50 Hz a display band is narrower than
   one FFT bin, and adjacent bars would otherwise read the same bin and move as one flat block.
 
-## Future work
+## Calibration
 
-Calibration. The dB numbers on the axis are FFT magnitudes in dB, not sound pressure level —
-the scale is arbitrary and mic-dependent. Referencing it against a known source would make the
-axis mean something.
+The dB numbers on the axis are FFT magnitudes in dB, not sound pressure level. The scale is
+arbitrary and mic-dependent, which is why `MIN_DB` and `MAX_DB` need hand-tuning per unit.
+
+`Tab5_MicCalibration/` is a separate sketch that measures the offset against a known source. It
+drives a piezo element from a GPIO across a range of frequencies, reads what the mic and FFT
+report at each, and prints CSV plus a paste-ready offset table. Setup instructions are in the
+sketch header.
+
+It needs a bare externally-driven piezo — a TDK PS1240P02BT or equivalent, *not* a buzzer with a
+built-in oscillator. 3.3 V logic sits just above the datasheet's 3 Vo-p test condition, so a GPIO
+drives it directly.
+
+Two things limit what this can achieve:
+
+- The piezo is resonant, useful over roughly 1-10 kHz and loudest near 4-5 kHz. Outside that
+  band the axis stays arbitrary. Extending it needs a source with a known flat-ish response —
+  a decent headphone driver held at a fixed distance is the cheap option.
+- A square wave at f also emits 3f, 5f, 7f..., and those harmonics land on the element's
+  resonance when f is low. The datasheet curve is broadband and includes them. The sketch
+  reports fundamental, harmonics, and broadband separately so you can see which points are
+  actually dominated by their fundamental and which are not worth anchoring to.
+
+The shape of the resulting curve is considerably more trustworthy than its absolute height,
+which traces back to a datasheet minimum measured in an anechoic chamber.
 
 ## License
 
