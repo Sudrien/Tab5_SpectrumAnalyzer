@@ -182,12 +182,19 @@ constexpr float HZ_PER_BIN  = (float)SAMPLE_RATE / (float)FFT_SIZE;
 // Accumulated magnitude spectrum, averaged over FRAMES_PER_POINT frames.
 float avgMag[USABLE_BINS];
 
+// Averaged magnitude spectrum captured once with the tone OFF, so each
+// tone's band can be compared against the noise IN THAT SAME BAND. The
+// earlier code compared a 7-bin tone against a 512-bin broadband sum,
+// which is not a like-for-like comparison and produced a meaningless
+// ~77 dB "floor" in a silent room.
+float noiseMag[USABLE_BINS];
+
 // Results, kept so the summary table can be printed at the end.
 float measuredFund[NUM_POINTS];
 float measuredBroad[NUM_POINTS];
+float measuredSnr[NUM_POINTS];
 float offsetDb[NUM_POINTS];
 bool  pointUsable[NUM_POINTS];
-float noiseFloorDb = 0.0f;
 
 // ---------------------------------------------------------------------
 
@@ -237,17 +244,22 @@ static void captureAveraged(int frames) {
   for (int i = 0; i < USABLE_BINS; i++) avgMag[i] /= (float)frames;
 }
 
-// Level in a small band around centerHz. A windowed tone smears across
-// a few bins, so summing power over the peak beats reading one bin.
-// Returns the same dB scale the analyzer uses: 20*log10(mag + 1).
-static float levelDbAround(float centerHz) {
+// Band level around centerHz, read out of an arbitrary spectrum array.
+// Summing power over the few bins a windowed tone smears across beats
+// reading a single bin. Returns the analyzer's dB scale: 20*log10(x+1).
+static float bandLevelDb(const float* spectrum, float centerHz) {
   if (centerHz <= 0.0f || centerHz >= SAMPLE_RATE / 2.0f) return NAN;
   int center = (int)roundf(centerHz / HZ_PER_BIN);
   int lo = max(1, center - BIN_HALF_WIDTH);
   int hi = min(USABLE_BINS - 1, center + BIN_HALF_WIDTH);
   float power = 0.0f;
-  for (int i = lo; i <= hi; i++) power += avgMag[i] * avgMag[i];
+  for (int i = lo; i <= hi; i++) power += spectrum[i] * spectrum[i];
   return 20.0f * log10f(sqrtf(power) + 1.0f);
+}
+
+// Convenience: band level in the current avgMag spectrum.
+static float levelDbAround(float centerHz) {
+  return bandLevelDb(avgMag, centerHz);
 }
 
 // Total level across the whole spectrum, DC excluded.
@@ -280,13 +292,15 @@ static void runCalibration() {
   Serial.println("# NOT dB SPL. datasheet_spl is dB @10cm from the part's chart.");
   Serial.println();
 
-  // --- Noise floor, tone off ---
+  // --- Noise floor, tone off. Store the whole spectrum so each tone's
+  //     band can later be compared against the noise in the same band. ---
   showStatus("Measuring noise floor", "keep quiet");
   toneOff();
   delay(SETTLE_MS * 2);
   captureAveraged(FRAMES_PER_POINT);
-  noiseFloorDb = broadbandDb();
-  Serial.printf("# broadband noise floor: %.1f dB\n", noiseFloorDb);
+  for (int i = 0; i < USABLE_BINS; i++) noiseMag[i] = avgMag[i];
+  Serial.println("# per-band noise measured with tone off; SNR below is");
+  Serial.println("# each tone's band vs the noise in that same band.");
   Serial.println();
 
   Serial.println("CAL,freq_hz,fund_db,h3_db,h5_db,broadband_db,snr_db,datasheet_spl,offset_db,usable");
@@ -304,11 +318,12 @@ static void runCalibration() {
 
     captureAveraged(FRAMES_PER_POINT);
 
-    float fund  = levelDbAround((float)hz);
-    float h3    = levelDbAround((float)hz * 3.0f);
-    float h5    = levelDbAround((float)hz * 5.0f);
-    float broad = broadbandDb();
-    float snr   = fund - noiseFloorDb;
+    float fund       = levelDbAround((float)hz);
+    float h3         = levelDbAround((float)hz * 3.0f);
+    float h5         = levelDbAround((float)hz * 5.0f);
+    float broad      = broadbandDb();
+    float noiseBand  = bandLevelDb(noiseMag, (float)hz);   // noise in THIS band
+    float snr        = fund - noiseBand;
 
     float ds     = testPoints[p].datasheetSpl;
     bool  hasRef = !isnan(ds);
@@ -317,6 +332,7 @@ static void runCalibration() {
 
     measuredFund[p]  = fund;
     measuredBroad[p] = broad;
+    measuredSnr[p]   = snr;
     offsetDb[p]      = off;
     pointUsable[p]   = usable;
 
@@ -346,11 +362,9 @@ static void runCalibration() {
                     (unsigned long)testPoints[p].hz, excess);
       Serial.println("#            mostly harmonics here; weak anchor, consider dropping.");
     }
-    if (!isnan(testPoints[p].datasheetSpl) &&
-        (measuredFund[p] - noiseFloorDb) < MIN_USABLE_SNR) {
-      Serial.printf("# %5lu Hz: only %.1f dB over noise floor — too quiet to trust.\n",
-                    (unsigned long)testPoints[p].hz,
-                    measuredFund[p] - noiseFloorDb);
+    if (!isnan(testPoints[p].datasheetSpl) && measuredSnr[p] < MIN_USABLE_SNR) {
+      Serial.printf("# %5lu Hz: only %.1f dB over the noise in its band — too quiet.\n",
+                    (unsigned long)testPoints[p].hz, measuredSnr[p]);
     }
   }
 
