@@ -1,3 +1,5 @@
+Hi folks this is "AI" garbage except for this line, I won't save you if you hang yourself with it. M5Stack Tab5 has 2 microphones. Let's graph it. 
+
 # Tab5 Spectrum Analyzer
 
 Audio spectrum analyzer for the [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) (ESP32-P4).
@@ -147,8 +149,3 @@ arduino-cli upload \
 
 The shape of the resulting curve is considerably more trustworthy than its absolute height,
 which traces back to a datasheet minimum measured in an anechoic chamber.
-
-## License
-
-None chosen. Absent a license the default is all rights reserved, which is probably not the
-intent — pick one before this matters to anybody.
