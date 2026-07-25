@@ -1,10 +1,22 @@
 /*
-  Tab5 Mic Calibration
-  ====================
+  Tab5 Mic Calibration  (piezo, ~5-10 kHz)
+  ========================================
   Companion to Tab5_SpectrumAnalyzer. Drives a piezo element from a GPIO
   at a series of known frequencies, measures what the mic + FFT chain
   reports at each, and prints the results as CSV over serial. The final
   block is a paste-ready C table of correction offsets.
+
+  Scope: this covers only ~5-10 kHz, the piezo's clean region. Below that
+  the element is too quiet and its harmonics swamp the fundamental, so it
+  cannot measure the mic there. For the low end use the headphone-based
+  sketch (Tab5_MicCalibration_Headphone) instead.
+
+  Each frequency is measured over several full runs (RUNS_TO_AVERAGE); the
+  reported offset is the mean, and the run-to-run SPREAD is printed per
+  frequency. Spread is the honest quality metric — a point that wanders
+  more than a dB or two between runs means the acoustic rig is moving, and
+  no within-run averaging fixes that. Only points stable across runs make
+  it into the paste-ready table.
 
   This sketch measures. It does not modify the analyzer. Integration is
   manual and deliberate — see "USING THE RESULTS" at the bottom.
@@ -55,22 +67,29 @@
      waves that vary with frequency, and a few dB of disagreement at any
      given point is expected, not a bug.
 
-  5. Flash, then watch the serial output:
+  5. Build with USBMode=hwcdc. On this ESP32-P4 the default cdc routing
+     gives the screen but NO serial to the host; hwcdc routes Serial to
+     the USB-Serial/JTAG peripheral that reaches the host (the screen goes
+     blank in that mode, which is fine here — this sketch only needs
+     serial). The analyzer stays on plain cdc because it needs the screen.
+
+         arduino-cli compile --fqbn "esp32:esp32:esp32p4:FlashSize=16M,PSRAM=enabled,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc,USBMode=hwcdc" .
+         arduino-cli upload  --fqbn "esp32:esp32:esp32p4:FlashSize=16M,PSRAM=enabled,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc,USBMode=hwcdc" --port /dev/ttyACM0 .
+
+     Then watch the serial output:
          tio -b 115200 /dev/ttyACM0
-     Or capture just the data to a file (recommended — see note below):
+     Or capture just the data to a file:
          tio -b 115200 --log --log-file cal.log /dev/ttyACM0
      then afterward:  grep '^CAL' cal.log
 
-     The sketch runs once at boot and then RE-RUNS ON A TIMER every few
-     seconds on its own, so no serial input needs to work. Tapping the
-     screen forces an immediate run. Serial 'r' also triggers one, but
-     only if USB-CDC input is actually being delivered, which on this chip
-     is unreliable — do not count on it. AUTO_REPEAT_MS sets the interval;
-     set AUTO_REPEAT false to run only on boot and taps.
+     Each trigger now runs RUNS_TO_AVERAGE full sweeps and reports the mean
+     offset plus run-to-run spread per frequency. It runs once at boot and
+     re-runs on a timer; tapping the screen forces an immediate run. Serial
+     'r' also triggers one if input happens to work — do not count on it.
 
-  6. Do at least two runs and compare — if the same frequency moves by
-     more than a dB or two between runs, the rig is moving or the room is
-     noisy, and the numbers are not yet worth fitting to.
+  6. Watch the SPREAD column in the summary. A point stable to within a dB
+     or two across runs is trustworthy; one that swings more than that
+     means the rig is moving and that point is dropped from the table.
 
   ---------------------------------------------------------------------
   IMPORTANT: KEEP THE AUDIO CHAIN IDENTICAL
@@ -129,11 +148,20 @@ constexpr int SAMPLE_RATE = 48000;
 constexpr int FFT_SIZE    = 1024;
 
 // Measurement behaviour.
-constexpr int   FRAMES_PER_POINT = 24;    // averaged per frequency
+constexpr int   FRAMES_PER_POINT = 96;    // averaged per frequency (was 24;
+                                          // more frames pulls each reading
+                                          // further out of the noise)
 constexpr int   DISCARD_FRAMES   = 4;     // dropped after each tone change
 constexpr int   SETTLE_MS        = 250;   // piezo + room settling time
 constexpr int   BIN_HALF_WIDTH   = 3;     // bins summed either side of a peak
 constexpr float MIN_USABLE_SNR   = 12.0f; // dB over noise floor to trust a point
+
+// Multi-run stability. Each frequency is measured RUNS_TO_AVERAGE times;
+// the printed offset is the mean, and the spread (max-min) across runs is
+// reported per frequency. Run-to-run spread is the real quality metric
+// here — if a point bounces by more than a dB or two, the acoustic rig is
+// moving and no amount of averaging within a run will save it.
+constexpr int RUNS_TO_AVERAGE = 5;
 
 // Behaviour after the first automatic run. Because USB-CDC serial input
 // is unreliable on this chip (keystrokes may never reach Serial.read),
@@ -143,6 +171,12 @@ constexpr bool     AUTO_REPEAT      = true;
 constexpr uint32_t AUTO_REPEAT_MS   = 8000;   // gap between automatic runs
 
 // Test frequencies and the datasheet's square-wave SPL at 10 cm.
+//
+// Trimmed to the piezo's clean region. Below ~5 kHz this element is too
+// quiet and its square-wave harmonics land on its own 4-5 kHz resonance
+// and swamp the fundamental, so those points measured the piezo's
+// resonance rather than the mic and are not recoverable. The bass end
+// needs a different source — see Tab5_MicCalibration_Headphone.
 //
 // These SPL values were read off the printed frequency-response chart by
 // eye and are worth no better than +/-2-3 dB. Re-read the chart yourself
@@ -155,15 +189,13 @@ struct TestPoint {
 };
 
 TestPoint testPoints[] = {
-  {  1000,  60.0f },
-  {  2000,  67.0f },
-  {  3000,  62.0f },
-  {  4000,  72.0f },
-  {  4500,  71.0f },
-  {  5000,  77.0f },   // main resonance, best anchor
+  {  5000,  77.0f },   // main resonance, loudest and cleanest
+  {  5500,  74.0f },
   {  6000,  65.0f },
+  {  6500,  67.0f },
   {  7000,  70.0f },
   {  8000,  65.0f },
+  {  9000,  62.0f },
   { 10000,  60.0f },
 };
 constexpr int NUM_POINTS = sizeof(testPoints) / sizeof(testPoints[0]);
@@ -195,6 +227,12 @@ float measuredBroad[NUM_POINTS];
 float measuredSnr[NUM_POINTS];
 float offsetDb[NUM_POINTS];
 bool  pointUsable[NUM_POINTS];
+
+// Multi-run accumulators, one slot per frequency.
+float offAccum[NUM_POINTS];   // sum of offsets across runs, for the mean
+float offMin[NUM_POINTS];     // smallest offset seen across runs
+float offMax[NUM_POINTS];     // largest offset seen across runs
+int   offCount[NUM_POINTS];   // runs that produced a usable reading here
 
 // ---------------------------------------------------------------------
 
@@ -281,35 +319,28 @@ static void showStatus(const char* line1, const char* line2) {
 
 // ---------------------------------------------------------------------
 
-static void runCalibration() {
+// One full physical pass: measure the noise floor, then sweep every test
+// frequency once. Fills measuredFund/Broad/Snr/offsetDb/pointUsable.
+// runIndex/runTotal are for the on-screen and serial progress labels.
+static void measurePass(int runIndex, int runTotal) {
   char l1[64], l2[64];
 
-  Serial.println();
-  Serial.println("# Tab5 mic calibration run");
-  Serial.printf("# sample_rate=%d fft_size=%d bin_hz=%.2f frames=%d\n",
-                SAMPLE_RATE, FFT_SIZE, HZ_PER_BIN, FRAMES_PER_POINT);
-  Serial.println("# levels are 20*log10(mag+1) on the analyzer's internal scale,");
-  Serial.println("# NOT dB SPL. datasheet_spl is dB @10cm from the part's chart.");
-  Serial.println();
-
   // --- Noise floor, tone off. Store the whole spectrum so each tone's
-  //     band can later be compared against the noise in the same band. ---
-  showStatus("Measuring noise floor", "keep quiet");
+  //     band can be compared against the noise in the same band. ---
+  snprintf(l1, sizeof(l1), "Noise floor");
+  snprintf(l2, sizeof(l2), "run %d/%d, keep quiet", runIndex, runTotal);
+  showStatus(l1, l2);
   toneOff();
   delay(SETTLE_MS * 2);
   captureAveraged(FRAMES_PER_POINT);
   for (int i = 0; i < USABLE_BINS; i++) noiseMag[i] = avgMag[i];
-  Serial.println("# per-band noise measured with tone off; SNR below is");
-  Serial.println("# each tone's band vs the noise in that same band.");
-  Serial.println();
-
-  Serial.println("CAL,freq_hz,fund_db,h3_db,h5_db,broadband_db,snr_db,datasheet_spl,offset_db,usable");
 
   for (int p = 0; p < NUM_POINTS; p++) {
     uint32_t hz = testPoints[p].hz;
 
     snprintf(l1, sizeof(l1), "Tone %lu Hz", (unsigned long)hz);
-    snprintf(l2, sizeof(l2), "point %d of %d", p + 1, NUM_POINTS);
+    snprintf(l2, sizeof(l2), "run %d/%d, point %d/%d",
+             runIndex, runTotal, p + 1, NUM_POINTS);
     showStatus(l1, l2);
 
     toneOn(hz);
@@ -318,12 +349,12 @@ static void runCalibration() {
 
     captureAveraged(FRAMES_PER_POINT);
 
-    float fund       = levelDbAround((float)hz);
-    float h3         = levelDbAround((float)hz * 3.0f);
-    float h5         = levelDbAround((float)hz * 5.0f);
-    float broad      = broadbandDb();
-    float noiseBand  = bandLevelDb(noiseMag, (float)hz);   // noise in THIS band
-    float snr        = fund - noiseBand;
+    float fund      = levelDbAround((float)hz);
+    float h3        = levelDbAround((float)hz * 3.0f);
+    float h5        = levelDbAround((float)hz * 5.0f);
+    float broad     = broadbandDb();
+    float noiseBand = bandLevelDb(noiseMag, (float)hz);
+    float snr       = fund - noiseBand;
 
     float ds     = testPoints[p].datasheetSpl;
     bool  hasRef = !isnan(ds);
@@ -336,7 +367,8 @@ static void runCalibration() {
     offsetDb[p]      = off;
     pointUsable[p]   = usable;
 
-    Serial.printf("CAL,%lu,%.1f,", (unsigned long)hz, fund);
+    // Per-run CSV line, tagged with the run number.
+    Serial.printf("CAL,%d,%lu,%.1f,", runIndex, (unsigned long)hz, fund);
     if (isnan(h3)) Serial.print("nyquist,"); else Serial.printf("%.1f,", h3);
     if (isnan(h5)) Serial.print("nyquist,"); else Serial.printf("%.1f,", h5);
     Serial.printf("%.1f,%.1f,", broad, snr);
@@ -346,64 +378,117 @@ static void runCalibration() {
   }
 
   toneOff();
-  showStatus("Run complete", AUTO_REPEAT ? "repeats; tap to force" : "tap to run again");
+}
+
+static void runCalibration() {
+  Serial.println();
+  Serial.println("# Tab5 mic calibration run");
+  Serial.printf("# sample_rate=%d fft_size=%d bin_hz=%.2f frames=%d runs=%d\n",
+                SAMPLE_RATE, FFT_SIZE, HZ_PER_BIN, FRAMES_PER_POINT, RUNS_TO_AVERAGE);
+  Serial.println("# levels are 20*log10(mag+1) on the analyzer's internal scale,");
+  Serial.println("# NOT dB SPL. datasheet_spl is dB @10cm from the part's chart.");
+  Serial.println("# SNR is each tone's band vs the noise in that same band.");
+  Serial.println();
+  Serial.println("CAL,run,freq_hz,fund_db,h3_db,h5_db,broadband_db,snr_db,datasheet_spl,offset_db,usable");
+
+  // Reset accumulators.
+  for (int p = 0; p < NUM_POINTS; p++) {
+    offAccum[p] = 0.0f;
+    offMin[p]   =  1e9f;
+    offMax[p]   = -1e9f;
+    offCount[p] = 0;
+  }
+
+  // Repeat the whole physical measurement several times.
+  for (int run = 1; run <= RUNS_TO_AVERAGE; run++) {
+    measurePass(run, RUNS_TO_AVERAGE);
+    for (int p = 0; p < NUM_POINTS; p++) {
+      if (!pointUsable[p]) continue;
+      offAccum[p] += offsetDb[p];
+      offMin[p]    = min(offMin[p], offsetDb[p]);
+      offMax[p]    = max(offMax[p], offsetDb[p]);
+      offCount[p]++;
+    }
+    delay(300);   // brief gap between runs
+  }
+
+  showStatus("Runs complete", AUTO_REPEAT ? "repeats; tap to force" : "tap to run again");
 
   // --- Summary ---
   Serial.println();
   Serial.println("# --- summary ---");
+  Serial.println("# per-frequency mean offset and run-to-run spread.");
+  Serial.println("# SPREAD is the real quality signal: a point that moves more");
+  Serial.println("# than ~2 dB across runs means the acoustic rig is moving.");
+  Serial.println();
+  Serial.println("# freq_hz  runs  mean_off  spread   flag");
 
-  int usableCount = 0;
-  for (int p = 0; p < NUM_POINTS; p++) if (pointUsable[p]) usableCount++;
+  int stableCount = 0;
+  for (int p = 0; p < NUM_POINTS; p++) {
+    if (offCount[p] == 0) {
+      Serial.printf("# %7lu     0        --      --   no usable reading\n",
+                    (unsigned long)testPoints[p].hz);
+      continue;
+    }
+    float mean   = offAccum[p] / offCount[p];
+    float spread = offMax[p] - offMin[p];
+    const char* flag = "ok";
+    if (spread > 3.0f)      flag = "UNSTABLE — rig moving?";
+    else if (spread > 1.5f) flag = "marginal";
+    else                    stableCount++;
+    Serial.printf("# %7lu  %4d  %8.2f  %6.2f   %s\n",
+                  (unsigned long)testPoints[p].hz, offCount[p], mean, spread, flag);
+  }
 
+  // Harmonic-contamination note (uses the last run's broadband/fund).
   for (int p = 0; p < NUM_POINTS; p++) {
     float excess = measuredBroad[p] - measuredFund[p];
     if (excess > 6.0f) {
-      Serial.printf("# %5lu Hz: broadband is %.1f dB above fundamental — output is\n",
+      Serial.printf("# %5lu Hz: broadband %.1f dB over fundamental — harmonic-heavy.\n",
                     (unsigned long)testPoints[p].hz, excess);
-      Serial.println("#            mostly harmonics here; weak anchor, consider dropping.");
-    }
-    if (!isnan(testPoints[p].datasheetSpl) && measuredSnr[p] < MIN_USABLE_SNR) {
-      Serial.printf("# %5lu Hz: only %.1f dB over the noise in its band — too quiet.\n",
-                    (unsigned long)testPoints[p].hz, measuredSnr[p]);
     }
   }
 
+  // --- Paste-ready table, mean offsets, stable points only ---
+  int pasteCount = 0;
+  for (int p = 0; p < NUM_POINTS; p++)
+    if (offCount[p] > 0 && (offMax[p] - offMin[p]) <= 3.0f) pasteCount++;
+
   Serial.println();
-  if (usableCount == 0) {
-    Serial.println("# No usable points. Check wiring, distance, and room noise.");
+  if (pasteCount == 0) {
+    Serial.println("# No sufficiently stable points. Check the rig and rerun.");
+    Serial.println();
     return;
   }
 
-  Serial.printf("# %d of %d points usable. Paste into the analyzer:\n",
-                usableCount, NUM_POINTS);
+  Serial.printf("# %d stable point(s). Mean offsets, paste into the analyzer:\n",
+                pasteCount);
   Serial.println();
   Serial.println("struct CalPoint { float hz; float offsetDb; };");
   Serial.println("static const CalPoint CAL_TABLE[] = {");
   for (int p = 0; p < NUM_POINTS; p++) {
-    if (!pointUsable[p]) continue;
+    if (offCount[p] == 0 || (offMax[p] - offMin[p]) > 3.0f) continue;
     Serial.printf("  { %8.1ff, %7.2ff },\n",
-                  (float)testPoints[p].hz, offsetDb[p]);
+                  (float)testPoints[p].hz, offAccum[p] / offCount[p]);
   }
   Serial.println("};");
   Serial.println();
 
-  // Spread of the offsets says whether one constant would do.
-  float mn = 1e9f, mx = -1e9f, sum = 0.0f;
+  // Spread of the mean offsets across frequency: is one constant enough?
+  float mn = 1e9f, mx = -1e9f, sum = 0.0f; int n = 0;
   for (int p = 0; p < NUM_POINTS; p++) {
-    if (!pointUsable[p]) continue;
-    mn = min(mn, offsetDb[p]);
-    mx = max(mx, offsetDb[p]);
-    sum += offsetDb[p];
+    if (offCount[p] == 0 || (offMax[p] - offMin[p]) > 3.0f) continue;
+    float mean = offAccum[p] / offCount[p];
+    mn = min(mn, mean); mx = max(mx, mean); sum += mean; n++;
   }
-  float mean = sum / usableCount;
-  Serial.printf("# offset mean %.2f dB, range %.2f dB (%.2f to %.2f)\n",
-                mean, mx - mn, mn, mx);
+  float grand = sum / n;
+  Serial.printf("# across frequency: mean %.2f dB, range %.2f dB (%.2f to %.2f)\n",
+                grand, mx - mn, mn, mx);
   if ((mx - mn) < 4.0f) {
-    Serial.println("# Range is small — a single constant offset is probably enough:");
-    Serial.printf("#   constexpr float CAL_OFFSET_DB = %.2f;\n", mean);
+    Serial.println("# Range is small — one constant offset is enough for this band:");
+    Serial.printf("#   constexpr float CAL_OFFSET_DB = %.2f;\n", grand);
   } else {
-    Serial.println("# Range is wide — the mic is not flat. Interpolate the table");
-    Serial.println("# rather than using one constant.");
+    Serial.println("# Range is wide — interpolate the table across frequency.");
   }
   Serial.println();
 }

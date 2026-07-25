@@ -97,26 +97,48 @@ Things worth knowing before changing the rendering:
 ## Calibration
 
 The dB numbers on the axis are FFT magnitudes in dB, not sound pressure level. The scale is
-arbitrary and mic-dependent, which is why `MIN_DB` and `MAX_DB` need hand-tuning per unit.
+arbitrary and mic-dependent, which is why `MIN_DB` and `MAX_DB` need hand-tuning per unit. Two
+companion sketches measure corrections against known sources. Both print CSV plus a paste-ready
+offset table; both need the `USBMode=hwcdc` build flag (see below).
 
-`Tab5_MicCalibration/` is a separate sketch that measures the offset against a known source. It
-drives a piezo element from a GPIO across a range of frequencies, reads what the mic and FFT
-report at each, and prints CSV plus a paste-ready offset table. Setup instructions are in the
-sketch header.
+`Tab5_MicCalibration/` — **piezo, ~5-10 kHz, absolute.** Drives a bare piezo element (TDK
+PS1240P02BT or equivalent, *not* a buzzer with a built-in oscillator) from GPIO G1 on ExtPort1.
+Compares the measured level at each frequency against the part's datasheet SPL curve to produce
+an absolute offset. Scope is limited to roughly 5-10 kHz: the piezo is resonant, so below that
+it is too quiet and its square-wave harmonics land on its own 4-5 kHz resonance and swamp the
+fundamental. Each frequency is measured over several runs and only points that are stable
+run-to-run are emitted — run-to-run spread, not point count, is what limits quality here, and it
+is almost always the acoustic rig moving.
 
-It needs a bare externally-driven piezo — a TDK PS1240P02BT or equivalent, *not* a buzzer with a
-built-in oscillator. 3.3 V logic sits just above the datasheet's 3 Vo-p test condition, so a GPIO
-drives it directly.
+`Tab5_MicCalibration_Headphone/` — **headphone, full range, relative.** For the range the piezo
+cannot reach. A dynamic headphone driver (e.g. Koss Porta Pro) is broadband and can excite low
+frequencies cleanly, but gives no absolute reference, so this measures the *shape* of the mic
+response, not dB SPL. You play tones from a phone or laptop tone generator; the sketch detects
+each and logs its level, advancing automatically. Combine the two: use the piezo's clean ~5 kHz
+point to pin the headphone sketch's relative curve to an absolute level. The sketch header walks
+through the arithmetic.
 
-Two things limit what this can achieve:
+Both share the caveat that the emitter's own response is part of the measurement, and both depend
+entirely on a fixed, repeatable distance between source and mic — near-field level changes fast
+with distance, so a rig that drifts between tones records that drift as response error.
 
-- The piezo is resonant, useful over roughly 1-10 kHz and loudest near 4-5 kHz. Outside that
-  band the axis stays arbitrary. Extending it needs a source with a known flat-ish response —
-  a decent headphone driver held at a fixed distance is the cheap option.
-- A square wave at f also emits 3f, 5f, 7f..., and those harmonics land on the element's
-  resonance when f is low. The datasheet curve is broadband and includes them. The sketch
-  reports fundamental, harmonics, and broadband separately so you can see which points are
-  actually dominated by their fundamental and which are not worth anchoring to.
+### The hwcdc build flag
+
+On this ESP32-P4 the default `Serial` routing (`CDCOnBoot=cdc`) drives the analyzer's display
+but delivers no serial output to the host. The calibration sketches need serial, so they build
+with `USBMode=hwcdc` added, which routes `Serial` through the USB-Serial/JTAG peripheral that
+actually reaches the host. The trade is that the display goes blank in that mode — fine for the
+calibration sketches, which only need serial, but the reason the **analyzer** stays on the
+plain `cdc` flag (it needs the screen, not serial). Do not flash the analyzer with `hwcdc` or
+you lose its display.
+
+```bash
+arduino-cli compile \
+  --fqbn "esp32:esp32:esp32p4:FlashSize=16M,PSRAM=enabled,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc,USBMode=hwcdc" .
+arduino-cli upload \
+  --fqbn "esp32:esp32:esp32p4:FlashSize=16M,PSRAM=enabled,PartitionScheme=app3M_fat9M_16MB,CDCOnBoot=cdc,USBMode=hwcdc" \
+  --port /dev/ttyACM0 .
+```
 
 The shape of the resulting curve is considerably more trustworthy than its absolute height,
 which traces back to a datasheet minimum measured in an anechoic chamber.
