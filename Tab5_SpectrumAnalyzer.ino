@@ -43,13 +43,21 @@
         --port /dev/ttyACM0 .
 
   TUNING
-    MIN_DB / MAX_DB      vertical range. Bars pinning to red means
-                         raise both; barely moving means lower both.
+    MIN_DBFS / MAX_DBFS  vertical range in dBFS. 0 = digital full scale
+                         (top); MIN_DBFS is the floor. Lower MIN_DBFS
+                         (e.g. -110) to see quieter detail; raise it
+                         (e.g. -70) to zoom the loud end.
     ATTACK_TAU           rise speed. Keep short so transients snap.
     RELEASE_TAU          fall speed. Raise if jumpy, lower if mushy.
     PEAK_FALL_PER_SEC    how fast the peak markers sink.
     FFT_SIZE             512 for more headroom, 2048 for finer bass
                          resolution at the cost of framerate.
+
+  The axis is dBFS (0 = full scale), the conventional analyzer scale and
+  the one FrequenSee uses. It needs no calibration — it comes from the
+  sample format. It is NOT dB SPL; converting to acoustic dB needs a real
+  reference, which the (retained) calibration sketches explore and which
+  turned out to need a fixture this project does not have. See README.
 */
 
 #include <M5Unified.h>
@@ -64,9 +72,32 @@ constexpr int NUM_BARS    = 64;
 constexpr float LOG_MIN_FREQ = 20.0f;
 constexpr float LOG_MAX_FREQ = (float)SAMPLE_RATE / 2.0f;
 
-// ---------- Level scaling ----------
-float MIN_DB = 30.0f;
-float MAX_DB = 160.0f;
+// ---------- Level scaling (dBFS) ----------
+// The axis is dBFS: 0 dB = digital full scale (the loudest the ADC can
+// represent), everything real below it. This is the same scale FrequenSee
+// and most analyzers use, and unlike raw FFT magnitude it needs no
+// calibration — it is defined by the sample format alone. It is NOT dB
+// SPL; the offset to true acoustic dB depends on mic sensitivity and gain
+// and would need a real acoustic reference to find.
+//
+// MIN_DBFS is the floor of the display (quietest shown); MAX_DBFS is the
+// top and should stay at 0 unless you want headroom above full scale.
+float MIN_DBFS = -90.0f;
+float MAX_DBFS =   0.0f;
+
+// Full-scale reference for the FFT magnitude, so a full-scale sine reads
+// 0 dBFS. Three factors:
+//   - Sample full scale: 16-bit signed peaks at 32768.
+//   - FFT scaling: arduinoFFT's magnitude for a real tone of amplitude A
+//     comes out ~ A * N / 2, so divide by N/2.
+//   - Window coherent gain: a Hamming window sums to ~0.54 of a rectangular
+//     one, attenuating the tone's bin by that factor; divide it back out.
+// Combined, a full-scale windowed sine lands at magnitude FULL_SCALE_MAG,
+// which maps to 0 dBFS.
+constexpr float SAMPLE_FULL_SCALE = 32768.0f;
+constexpr float HAMMING_COHERENT_GAIN = 0.54f;
+constexpr float FULL_SCALE_MAG =
+    SAMPLE_FULL_SCALE * (FFT_SIZE / 2.0f) * HAMMING_COHERENT_GAIN;
 
 // ---------- Ballistics ----------
 // Exponential time constants in seconds. Because these are expressed in
@@ -185,14 +216,16 @@ void setup() {
     rowIsGrid[h] = false;
   }
 
-  // dB ticks: flag the gridline rows and draw the left-hand labels.
+  // dBFS ticks: flag gridline rows and draw the left-hand labels. Ticks
+  // run from MIN_DBFS up to MAX_DBFS in 10 dB steps, so labels read like
+  // -90, -80, ... 0 up the axis.
   numDbTicks = 0;
-  int firstTick = ((int)MIN_DB / 10) * 10;
-  if (firstTick < MIN_DB) firstTick += 10;
+  int firstTick = ((int)MIN_DBFS / 10) * 10;
+  if (firstTick < MIN_DBFS) firstTick += 10;
   M5.Display.setTextSize(2);
   M5.Display.setTextColor(TFT_LIGHTGREY);
-  for (int db = firstTick; db <= (int)MAX_DB && numDbTicks < 24; db += 10) {
-    float frac = (db - MIN_DB) / (MAX_DB - MIN_DB);
+  for (int db = firstTick; db <= (int)MAX_DBFS && numDbTicks < 24; db += 10) {
+    float frac = (db - MIN_DBFS) / (MAX_DBFS - MIN_DBFS);
     int h = (int)(frac * graphH);
     if (h < 0 || h > graphH) continue;
     rowIsGrid[h] = true;
@@ -200,11 +233,18 @@ void setup() {
     dbTickY[numDbTicks++] = y;
 
     char buf[8];
-    snprintf(buf, sizeof(buf), "%ddB", db);
+    snprintf(buf, sizeof(buf), "%d", db);   // e.g. -60; unit shown in axis title
     int tw = M5.Display.textWidth(buf);
     M5.Display.setCursor(graphLeft - tw - 8, y - 8);
     M5.Display.print(buf);
   }
+
+  // dBFS unit marker at the top of the axis, so the negative numbers read
+  // clearly as dB below full scale.
+  M5.Display.setTextSize(2);
+  M5.Display.setTextColor(TFT_LIGHTGREY);
+  M5.Display.setCursor(10, graphTop - 22);
+  M5.Display.print("dBFS");
 
   // Frequency labels, positioned along the log axis.
   M5.Display.setTextSize(3);
@@ -298,7 +338,7 @@ void loop() {
   const float peakDrop = PEAK_FALL_PER_SEC * dt;
 
   // ---------- render ----------
-  const float dbSpan = MAX_DB - MIN_DB;
+  const float dbSpan = MAX_DBFS - MIN_DBFS;
   M5.Display.startWrite();
 
   for (int b = 0; b < NUM_BARS; b++) {
@@ -314,8 +354,8 @@ void loop() {
       mag = sum / (float)(bandHiBin[b] - bandLoBin[b] + 1);
     }
 
-    float db  = 20.0f * log10f(mag + 1.0f);
-    float raw = constrain((db - MIN_DB) / dbSpan, 0.0f, 1.0f);
+    float db  = 20.0f * log10f(mag / FULL_SCALE_MAG + 1e-9f);  // dBFS, 0 = full scale
+    float raw = constrain((db - MIN_DBFS) / dbSpan, 0.0f, 1.0f);
 
     // Rise quickly, fall gently.
     float s = smoothFrac[b];

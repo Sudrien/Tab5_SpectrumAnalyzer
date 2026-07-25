@@ -2,11 +2,13 @@
 
 Audio spectrum analyzer for the [M5Stack Tab5](https://docs.m5stack.com/en/core/Tab5) (ESP32-P4).
 Reads the onboard mic, runs a windowed FFT, draws 64 logarithmically spaced bars on the
-1280x720 display. Runs around 47 fps.
+1280x720 display. The vertical axis is dBFS (0 = digital full scale), the conventional analyzer
+scale. Runs around 47 fps.
 
 ![Tab5 running the spectrum analyzer](screenshot.jpg)
 
-That is what it looks like with all the ducks in a row.
+That is what it looks like with all the ducks in a row. (The photo predates the switch to a
+dBFS axis, so the left-hand scale reads differently now — negative dBFS values, 0 at the top.)
 
 Same general shape as the stock M5Stack FFT bar-graph demos — mic, FFT, bars — but a Tab5
 screen is a lot more pixels than a Core, and the naive draw loop does not keep up. See
@@ -94,33 +96,36 @@ Things worth knowing before changing the rendering:
 - **Low bands interpolate between bins.** Below roughly 50 Hz a display band is narrower than
   one FFT bin, and adjacent bars would otherwise read the same bin and move as one flat block.
 
-## Calibration
+## Calibration (and why the axis is dBFS instead)
 
-The dB numbers on the axis are FFT magnitudes in dB, not sound pressure level. The scale is
-arbitrary and mic-dependent, which is why `MIN_DB` and `MAX_DB` need hand-tuning per unit. Two
-companion sketches measure corrections against known sources. Both print CSV plus a paste-ready
-offset table; both need the `USBMode=hwcdc` build flag (see below).
+The axis is **dBFS**: 0 dB is digital full scale, everything real sits below it. This scale is
+defined by the sample format alone, needs no calibration, and is what FrequenSee and most
+analyzers show. It is *not* dB SPL — the offset to true acoustic dB depends on mic sensitivity
+and gain.
 
-`Tab5_MicCalibration/` — **piezo, ~5-10 kHz, absolute.** Drives a bare piezo element (TDK
-PS1240P02BT or equivalent, *not* a buzzer with a built-in oscillator) from GPIO G1 on ExtPort1.
-Compares the measured level at each frequency against the part's datasheet SPL curve to produce
-an absolute offset. Scope is limited to roughly 5-10 kHz: the piezo is resonant, so below that
-it is too quiet and its square-wave harmonics land on its own 4-5 kHz resonance and swamp the
-fundamental. Each frequency is measured over several runs and only points that are stable
-run-to-run are emitted — run-to-run spread, not point count, is what limits quality here, and it
-is almost always the acoustic rig moving.
+The two calibration sketches below predate that decision. They were an attempt to turn the old
+arbitrary FFT-magnitude scale into something meaningful by measuring against known sources. Along
+the way two things became clear: the scale mostly just needed a proper reference (which dBFS
+provides for free), and true acoustic-SPL calibration needs repeatable acoustic coupling that a
+hand-held source in open air does not give — an earpad swap alone moved the midrange by up to
+7 dB. The sketches are kept because that path is worth understanding, and because the piezo's one
+clean point near 5 kHz is still the seed of a real SPL anchor if anyone wants to build the
+fixture for it. For everyday use, dBFS is the right scale and no calibration is required.
+
+`Tab5_MicCalibration/` — **piezo, ~5-10 kHz, absolute-SPL attempt.** Drives a bare piezo element
+(TDK PS1240P02BT or equivalent, *not* a buzzer with a built-in oscillator) from GPIO G1 on
+ExtPort1, comparing measured level against the part's datasheet SPL curve. Limited to ~5-10 kHz,
+the piezo's clean resonant region. Measures each frequency over several runs and reports
+run-to-run spread, since repeatability, not point count, is the real limit.
 
 `Tab5_MicCalibration_Headphone/` — **headphone, full range, relative.** For the range the piezo
-cannot reach. A dynamic headphone driver (e.g. Koss Porta Pro) is broadband and can excite low
-frequencies cleanly, but gives no absolute reference, so this measures the *shape* of the mic
-response, not dB SPL. You play tones from a phone or laptop tone generator; the sketch detects
-each and logs its level, advancing automatically. Combine the two: use the piezo's clean ~5 kHz
-point to pin the headphone sketch's relative curve to an absolute level. The sketch header walks
-through the arithmetic.
+cannot reach. A dynamic headphone driver excites low frequencies cleanly but gives no absolute
+reference, so it measures response *shape*, not level. You play tones from a phone or laptop tone
+generator; the sketch detects each and logs it. This is what demonstrated the coupling problem
+above.
 
-Both share the caveat that the emitter's own response is part of the measurement, and both depend
-entirely on a fixed, repeatable distance between source and mic — near-field level changes fast
-with distance, so a rig that drifts between tones records that drift as response error.
+`Tab5_SerialHeartbeat/` — trivial diagnostic that prints a counter to both screen and serial,
+used to prove which of {console, display, sketch} is at fault when there is no output.
 
 ### The hwcdc build flag
 
