@@ -69,7 +69,7 @@ constexpr int FFT_SIZE    = 1024;    // power of 2; ~46.9 Hz per bin
 constexpr int NUM_BARS    = 64;
 
 // ---------- Frequency axis ----------
-constexpr float LOG_MIN_FREQ = 20.0f;
+constexpr float LOG_MIN_FREQ = 50.0f;
 constexpr float LOG_MAX_FREQ = (float)SAMPLE_RATE / 2.0f;
 
 // ---------- Level scaling (dBFS) ----------
